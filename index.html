@@ -298,7 +298,6 @@ function triggerSlotInput(slotId) {
   input.type = 'file';
   input.accept = 'image/*,video/*';
   input.multiple = true;
-  input.capture = 'environment';
   input.onchange = e => handleSlotMedia(slotId, e);
   input.click();
 }
