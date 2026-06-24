@@ -53,6 +53,7 @@
   .slot-header{display:flex;align-items:center;justify-content:space-between;padding:.7rem .9rem;cursor:pointer}
   .slot-title{font-size:13px;font-weight:600;color:#e8e0c8}
   .slot-count{font-size:11px;color:var(--gold);background:rgba(184,137,42,.15);border-radius:8px;padding:2px 8px}
+  .slot-done-badge{font-size:11px;color:#7ecb8f;background:rgba(126,203,143,.15);border-radius:8px;padding:2px 8px;white-space:nowrap}
   .slot-add{border:1.5px dashed var(--gold-dim);border-radius:10px;padding:.7rem;text-align:center;margin:0 .9rem .9rem;cursor:pointer;color:var(--text-muted);font-size:12px}
   .slot-media-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:0 .9rem .9rem}
   .slot-media-grid:empty{display:none}
@@ -112,6 +113,11 @@
   <div class="job-summary" id="jobSummary"></div>
 
   <div id="updateSection" style="display:none">
+    <p class="section-title">Tech notes</p>
+    <div class="field">
+      <textarea id="detailsText" placeholder="What was done / found / next steps..."></textarea>
+    </div>
+
     <p class="section-title">Photos / video</p>
     <div id="mediaSlots"></div>
 
@@ -123,11 +129,6 @@
     <div class="field" style="margin-bottom:1rem">
       <label>Road test notes</label>
       <textarea id="roadTestNotes" placeholder="Any noises, handling issues, or follow-up needed..."></textarea>
-    </div>
-
-    <p class="section-title">Tech notes</p>
-    <div class="field">
-      <textarea id="detailsText" placeholder="What was done / found / next steps..."></textarea>
     </div>
 
     <button class="submit-btn" id="submitBtn" onclick="submitUpdate()">Send update to Trello</button>
@@ -235,6 +236,7 @@ function onJobSelect(cardId) {
   updateSection.style.display = 'block';
   MEDIA_SLOTS.forEach(s => media[s.id] = []);
   renderMediaSlots();
+  checkExistingAttachments(cardId).then(renderMediaSlots);
   document.getElementById('roadTestPass').checked = false;
   document.getElementById('roadTestNotes').value = '';
   document.getElementById('detailsText').value = '';
@@ -252,6 +254,25 @@ const MEDIA_SLOTS = [
 let media = {}; // { slotId: [{name, base64, file, isVideo}] }
 MEDIA_SLOTS.forEach(s => media[s.id] = []);
 
+let existingSlots = {}; // { slotId: count of existing attachments already on the card }
+MEDIA_SLOTS.forEach(s => existingSlots[s.id] = 0);
+
+async function checkExistingAttachments(cardId) {
+  MEDIA_SLOTS.forEach(s => existingSlots[s.id] = 0);
+  const { key, token } = getCreds();
+  if (!key || !token) return;
+  try {
+    const r = await fetch(`https://api.trello.com/1/cards/${cardId}/attachments?fields=name&key=${key}&token=${token}`);
+    if (!r.ok) return;
+    const attachments = await r.json();
+    MEDIA_SLOTS.forEach(slot => {
+      existingSlots[slot.id] = attachments.filter(a => a.name && a.name.startsWith(slot.label + ' - ')).length;
+    });
+  } catch (e) {
+    console.log('Could not check existing attachments', e);
+  }
+}
+
 function renderMediaSlots() {
   const wrap = document.getElementById('mediaSlots');
   wrap.innerHTML = '';
@@ -262,7 +283,15 @@ function renderMediaSlots() {
 
     const header = document.createElement('div');
     header.className = 'slot-header';
-    header.innerHTML = `<span class="slot-title">${slot.label}</span>${items.length ? `<span class="slot-count">${items.length}</span>` : ''}`;
+    const alreadyCount = existingSlots[slot.id] || 0;
+    let badges = '';
+    if (alreadyCount > 0) {
+      badges += `<span class="slot-done-badge">✓ ${alreadyCount} already on card</span>`;
+    }
+    if (items.length) {
+      badges += `<span class="slot-count">+${items.length} new</span>`;
+    }
+    header.innerHTML = `<span class="slot-title">${slot.label}</span><span style="display:flex;gap:6px">${badges}</span>`;
     card.appendChild(header);
 
     const add = document.createElement('div');
@@ -386,6 +415,7 @@ async function submitUpdate() {
     btn.disabled = false;
     showToast('Update sent to Trello!');
     MEDIA_SLOTS.forEach(s => media[s.id] = []);
+    await checkExistingAttachments(cardId);
     renderMediaSlots();
     document.getElementById('roadTestPass').checked = false;
     document.getElementById('roadTestNotes').value = '';
