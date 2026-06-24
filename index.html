@@ -115,6 +115,16 @@
     <p class="section-title">Photos / video</p>
     <div id="mediaSlots"></div>
 
+    <p class="section-title">Road test</p>
+    <div class="card" style="display:flex;align-items:center;gap:10px;margin-bottom:.75rem">
+      <input type="checkbox" id="roadTestPass" style="width:20px;height:20px;accent-color:var(--gold);flex-shrink:0">
+      <label for="roadTestPass" style="font-size:14px;color:#e8e0c8;font-weight:500;cursor:pointer">Vehicle passed road test</label>
+    </div>
+    <div class="field" style="margin-bottom:1rem">
+      <label>Road test notes</label>
+      <textarea id="roadTestNotes" placeholder="Any noises, handling issues, or follow-up needed..."></textarea>
+    </div>
+
     <p class="section-title">Tech notes</p>
     <div class="field">
       <textarea id="detailsText" placeholder="What was done / found / next steps..."></textarea>
@@ -225,6 +235,8 @@ function onJobSelect(cardId) {
   updateSection.style.display = 'block';
   MEDIA_SLOTS.forEach(s => media[s.id] = []);
   renderMediaSlots();
+  document.getElementById('roadTestPass').checked = false;
+  document.getElementById('roadTestNotes').value = '';
   document.getElementById('detailsText').value = '';
 }
 
@@ -322,9 +334,11 @@ async function submitUpdate() {
   if (!key || !token) { showToast('Trello not configured — check Settings'); return; }
 
   const detailsText = document.getElementById('detailsText').value.trim();
+  const roadTestPass = document.getElementById('roadTestPass').checked;
+  const roadTestNotes = document.getElementById('roadTestNotes').value.trim();
   const totalMedia = MEDIA_SLOTS.reduce((sum, s) => sum + media[s.id].length, 0);
-  if (totalMedia === 0 && !detailsText) {
-    showToast('Add a photo/video or tech notes first');
+  if (totalMedia === 0 && !detailsText && !roadTestNotes) {
+    showToast('Add a photo/video or some notes first');
     return;
   }
 
@@ -352,13 +366,18 @@ async function submitUpdate() {
       }
     }
 
-    // Add tech notes as a new comment
-    if (detailsText) {
+    // Add road test result + tech notes as a single comment
+    const commentParts = [];
+    commentParts.push('Road test: ' + (roadTestPass ? 'PASSED' : 'NOT PASSED'));
+    if (roadTestNotes) commentParts.push('Road test notes: ' + roadTestNotes);
+    if (detailsText) commentParts.push('Tech notes: ' + detailsText);
+
+    if (commentParts.length) {
       progress.textContent = 'Adding comment...';
       const r = await fetch(`https://api.trello.com/1/cards/${cardId}/actions/comments?key=${key}&token=${token}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: 'Tech notes: ' + detailsText })
+        body: JSON.stringify({ text: commentParts.join('\n') })
       });
       if (!r.ok) throw new Error('Comment failed: ' + r.status);
     }
@@ -368,6 +387,8 @@ async function submitUpdate() {
     showToast('Update sent to Trello!');
     MEDIA_SLOTS.forEach(s => media[s.id] = []);
     renderMediaSlots();
+    document.getElementById('roadTestPass').checked = false;
+    document.getElementById('roadTestNotes').value = '';
     document.getElementById('detailsText').value = '';
   } catch (e) {
     progress.style.display = 'none';
