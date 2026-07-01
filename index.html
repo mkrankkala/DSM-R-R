@@ -532,7 +532,7 @@ async function loadNotesHistory(cardId) {
   }
 }
 
-
+async function markComplete() {
   const cardId = document.getElementById('jobSelect').value;
   if (!cardId) { showToast('Select a job first'); return; }
 
