@@ -294,6 +294,8 @@ function loadCardText(cardId) {
 function clearCardText(cardId) {
   localStorage.removeItem('rrEntry_' + cardId);
 }
+
+async function checkExistingAttachments(cardId) {
   MEDIA_SLOTS.forEach(s => existingSlots[s.id] = 0);
   const { key, token } = getCreds();
   if (!key || !token) return;
