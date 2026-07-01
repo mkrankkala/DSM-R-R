@@ -76,7 +76,10 @@
 
   .progress-text{font-size:12px;color:var(--text-muted);text-align:center;margin-top:.5rem;display:none}
 
-  .empty-state{text-align:center;padding:2rem 1rem;color:var(--text-muted);font-size:13px}
+  .notes-history-entry{background:rgba(184,137,42,.06);border:1px solid rgba(184,137,42,.2);border-radius:10px;padding:.7rem .9rem;margin-bottom:.5rem}
+  .notes-history-date{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+  .notes-history-text{font-size:13px;color:#c8bfa8;line-height:1.55;white-space:pre-wrap}
+  .notes-history-label{font-size:10px;font-weight:600;color:var(--gold);letter-spacing:.06em;text-transform:uppercase;margin-bottom:2px}
 </style>
 </head>
 <body>
@@ -114,6 +117,7 @@
 
   <div id="updateSection" style="display:none">
     <p class="section-title">Tech notes</p>
+    <div id="notesHistory" style="display:none;margin-bottom:.75rem"></div>
     <div class="field">
       <textarea id="detailsText" placeholder="What was done / found / next steps..." oninput="saveCardText(document.getElementById('jobSelect').value)"></textarea>
     </div>
@@ -122,6 +126,7 @@
     <div id="mediaSlots"></div>
 
     <p class="section-title">Road test</p>
+    <div id="roadTestHistory" style="display:none;margin-bottom:.75rem"></div>
     <div class="card" style="display:flex;align-items:center;gap:10px;margin-bottom:.75rem">
       <input type="checkbox" id="roadTestPass" style="width:20px;height:20px;accent-color:var(--gold);flex-shrink:0" onchange="saveCardText(document.getElementById('jobSelect').value)">
       <label for="roadTestPass" style="font-size:14px;color:#e8e0c8;font-weight:500;cursor:pointer">Vehicle passed road test</label>
@@ -132,6 +137,7 @@
     </div>
 
     <button class="submit-btn" id="submitBtn" onclick="submitUpdate()">Send update to Trello</button>
+    <button class="submit-btn" id="completeBtn" onclick="markComplete()" style="background:transparent;border:1px solid #7ecb8f;color:#7ecb8f;margin-top:10px">✓ Mark job complete</button>
     <div class="progress-text" id="progressText"></div>
   </div>
 
@@ -181,6 +187,7 @@ function getCreds() {
 }
 
 let jobsCache = [];
+let completedListId = null;
 
 async function loadJobs() {
   const { key, token, listId } = getCreds();
@@ -197,11 +204,16 @@ async function loadJobs() {
   select.innerHTML = '<option value="">-- Loading jobs... --</option>';
 
   try {
+    // Get the board ID from the R&R list, then find the completed list
+    const listInfo = await fetch(`https://api.trello.com/1/lists/${listId}?fields=idBoard&key=${key}&token=${token}`).then(r => r.json());
+    const boardId = listInfo.idBoard;
+    const allLists = await fetch(`https://api.trello.com/1/boards/${boardId}/lists?fields=id,name&key=${key}&token=${token}`).then(r => r.json());
+    const completedList = allLists.find(l => l.name.toLowerCase().includes('completed vehicle r&r') || l.name.toLowerCase().includes('completed vehicle r&amp;r'));
+    completedListId = completedList ? completedList.id : null;
+
     const r = await fetch(`https://api.trello.com/1/lists/${listId}/cards?fields=name,id,desc,dueComplete&key=${key}&token=${token}`);
     if (!r.ok) throw new Error('Bad response ' + r.status);
     const cards = await r.json();
-
-    // Filter out cards marked as complete via Trello's native completion checkmark
     const activeCards = cards.filter(c => !c.dueComplete);
     jobsCache = activeCards;
 
@@ -241,6 +253,7 @@ function onJobSelect(cardId) {
   renderMediaSlots();
   checkExistingAttachments(cardId).then(renderMediaSlots);
   loadCardText(cardId);
+  loadNotesHistory(cardId);
 }
 
 const MEDIA_SLOTS = [
@@ -420,8 +433,10 @@ async function submitUpdate() {
 
     // Add road test result + tech notes as a single comment
     const commentParts = [];
-    commentParts.push('Road test: ' + (roadTestPass ? 'PASSED' : 'NOT PASSED'));
-    if (roadTestNotes) commentParts.push('Road test notes: ' + roadTestNotes);
+    if (roadTestNotes) {
+      commentParts.push('Road test: ' + (roadTestPass ? 'PASSED' : 'NOT PASSED'));
+      commentParts.push('Road test notes: ' + roadTestNotes);
+    }
     if (detailsText) commentParts.push('Tech notes: ' + detailsText);
 
     if (commentParts.length) {
@@ -441,6 +456,7 @@ async function submitUpdate() {
     MEDIA_SLOTS.forEach(s => media[s.id] = []);
     await checkExistingAttachments(cardId);
     renderMediaSlots();
+    loadNotesHistory(cardId);
     document.getElementById('roadTestPass').checked = false;
     document.getElementById('roadTestNotes').value = '';
     document.getElementById('detailsText').value = '';
@@ -452,8 +468,110 @@ async function submitUpdate() {
   }
 }
 
-// Init
-loadJobs();
+async function loadNotesHistory(cardId) {
+  const { key, token } = getCreds();
+  const notesDiv = document.getElementById('notesHistory');
+  const roadTestDiv = document.getElementById('roadTestHistory');
+  notesDiv.style.display = 'none';
+  notesDiv.innerHTML = '';
+  roadTestDiv.style.display = 'none';
+  roadTestDiv.innerHTML = '';
+
+  try {
+    const r = await fetch(`https://api.trello.com/1/cards/${cardId}/actions?filter=commentCard&key=${key}&token=${token}`);
+    if (!r.ok) return;
+    const comments = await r.json();
+    if (!comments.length) return;
+
+    const techEntries = [];
+    const roadEntries = [];
+
+    comments.forEach(c => {
+      const text = c.data.text || '';
+      const date = new Date(c.date).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' });
+
+      // Parse out tech notes and road test sections
+      const techMatch = text.match(/Tech notes:\s*([\s\S]*?)(?=Road test:|$)/i);
+      const roadTestMatch = text.match(/Road test:\s*(PASSED|NOT PASSED)/i);
+      const roadNotesMatch = text.match(/Road test notes:\s*([\s\S]*?)(?=Tech notes:|$)/i);
+
+      if (techMatch && techMatch[1].trim()) {
+        techEntries.push({ date, text: techMatch[1].trim() });
+      }
+      if (roadTestMatch || (roadNotesMatch && roadNotesMatch[1].trim())) {
+        roadEntries.push({
+          date,
+          result: roadTestMatch ? roadTestMatch[1] : null,
+          notes: roadNotesMatch ? roadNotesMatch[1].trim() : ''
+        });
+      }
+    });
+
+    if (techEntries.length) {
+      techEntries.reverse().forEach(e => {
+        notesDiv.innerHTML += `<div class="notes-history-entry">
+          <div class="notes-history-date">${e.date}</div>
+          <div class="notes-history-text">${e.text}</div>
+        </div>`;
+      });
+      notesDiv.style.display = 'block';
+    }
+
+    if (roadEntries.length) {
+      roadEntries.reverse().forEach(e => {
+        let html = `<div class="notes-history-entry"><div class="notes-history-date">${e.date}</div>`;
+        if (e.result) html += `<div class="notes-history-label" style="color:${e.result === 'PASSED' ? '#7ecb8f' : '#e07070'}">${e.result}</div>`;
+        if (e.notes) html += `<div class="notes-history-text">${e.notes}</div>`;
+        html += `</div>`;
+        roadTestDiv.innerHTML += html;
+      });
+      roadTestDiv.style.display = 'block';
+    }
+  } catch (e) {
+    console.log('Could not load notes history', e);
+  }
+}
+
+
+  const cardId = document.getElementById('jobSelect').value;
+  if (!cardId) { showToast('Select a job first'); return; }
+
+  const { key, token } = getCreds();
+  if (!completedListId) { showToast('Could not find "Completed Vehicle R&R" list — check list name in Trello'); return; }
+
+  if (!confirm('Mark this job as complete and move it to Completed Vehicle R&R?')) return;
+
+  const btn = document.getElementById('completeBtn');
+  btn.disabled = true;
+  btn.textContent = 'Moving...';
+
+  try {
+    const r = await fetch(`https://api.trello.com/1/cards/${cardId}?key=${key}&token=${token}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idList: completedListId })
+    });
+    if (!r.ok) throw new Error('Move failed: ' + r.status);
+
+    // Remove from dropdown and reset the form
+    clearCardText(cardId);
+    const select = document.getElementById('jobSelect');
+    const opt = select.querySelector(`option[value="${cardId}"]`);
+    if (opt) opt.remove();
+    select.value = '';
+    document.getElementById('jobSummary').style.display = 'none';
+    document.getElementById('updateSection').style.display = 'none';
+    showToast('Job marked complete!');
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '✓ Mark job complete';
+    showToast('Failed to move card — ' + e.message);
+  }
+}
+
+
 </script>
 </body>
 </html>
+// Init
+loadJobs();
