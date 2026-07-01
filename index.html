@@ -115,7 +115,7 @@
   <div id="updateSection" style="display:none">
     <p class="section-title">Tech notes</p>
     <div class="field">
-      <textarea id="detailsText" placeholder="What was done / found / next steps..."></textarea>
+      <textarea id="detailsText" placeholder="What was done / found / next steps..." oninput="saveCardText(document.getElementById('jobSelect').value)"></textarea>
     </div>
 
     <p class="section-title">Photos / video</p>
@@ -123,12 +123,12 @@
 
     <p class="section-title">Road test</p>
     <div class="card" style="display:flex;align-items:center;gap:10px;margin-bottom:.75rem">
-      <input type="checkbox" id="roadTestPass" style="width:20px;height:20px;accent-color:var(--gold);flex-shrink:0">
+      <input type="checkbox" id="roadTestPass" style="width:20px;height:20px;accent-color:var(--gold);flex-shrink:0" onchange="saveCardText(document.getElementById('jobSelect').value)">
       <label for="roadTestPass" style="font-size:14px;color:#e8e0c8;font-weight:500;cursor:pointer">Vehicle passed road test</label>
     </div>
     <div class="field" style="margin-bottom:1rem">
       <label>Road test notes</label>
-      <textarea id="roadTestNotes" placeholder="Any noises, handling issues, or follow-up needed..."></textarea>
+      <textarea id="roadTestNotes" placeholder="Any noises, handling issues, or follow-up needed..." oninput="saveCardText(document.getElementById('jobSelect').value)"></textarea>
     </div>
 
     <button class="submit-btn" id="submitBtn" onclick="submitUpdate()">Send update to Trello</button>
@@ -197,17 +197,20 @@ async function loadJobs() {
   select.innerHTML = '<option value="">-- Loading jobs... --</option>';
 
   try {
-    const r = await fetch(`https://api.trello.com/1/lists/${listId}/cards?customFieldItems=true&fields=name,id,desc&key=${key}&token=${token}`);
+    const r = await fetch(`https://api.trello.com/1/lists/${listId}/cards?fields=name,id,desc,dueComplete&key=${key}&token=${token}`);
     if (!r.ok) throw new Error('Bad response ' + r.status);
     const cards = await r.json();
-    jobsCache = cards;
+
+    // Filter out cards marked as complete via Trello's native completion checkmark
+    const activeCards = cards.filter(c => !c.dueComplete);
+    jobsCache = activeCards;
 
     select.innerHTML = '<option value="">-- Select a job --</option>';
-    if (cards.length === 0) {
+    if (activeCards.length === 0) {
       emptyState.style.display = 'block';
       return;
     }
-    cards.forEach(c => {
+    activeCards.forEach(c => {
       const opt = document.createElement('option');
       opt.value = c.id;
       opt.textContent = c.name;
@@ -237,9 +240,7 @@ function onJobSelect(cardId) {
   MEDIA_SLOTS.forEach(s => media[s.id] = []);
   renderMediaSlots();
   checkExistingAttachments(cardId).then(renderMediaSlots);
-  document.getElementById('roadTestPass').checked = false;
-  document.getElementById('roadTestNotes').value = '';
-  document.getElementById('detailsText').value = '';
+  loadCardText(cardId);
 }
 
 const MEDIA_SLOTS = [
@@ -257,7 +258,29 @@ MEDIA_SLOTS.forEach(s => media[s.id] = []);
 let existingSlots = {}; // { slotId: count of existing attachments already on the card }
 MEDIA_SLOTS.forEach(s => existingSlots[s.id] = 0);
 
-async function checkExistingAttachments(cardId) {
+function saveCardText(cardId) {
+  const data = {
+    techNotes: document.getElementById('detailsText').value,
+    roadTestPass: document.getElementById('roadTestPass').checked,
+    roadTestNotes: document.getElementById('roadTestNotes').value,
+  };
+  localStorage.setItem('rrEntry_' + cardId, JSON.stringify(data));
+}
+
+function loadCardText(cardId) {
+  try {
+    const raw = localStorage.getItem('rrEntry_' + cardId);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    document.getElementById('detailsText').value = data.techNotes || '';
+    document.getElementById('roadTestPass').checked = !!data.roadTestPass;
+    document.getElementById('roadTestNotes').value = data.roadTestNotes || '';
+  } catch (e) {}
+}
+
+function clearCardText(cardId) {
+  localStorage.removeItem('rrEntry_' + cardId);
+}
   MEDIA_SLOTS.forEach(s => existingSlots[s.id] = 0);
   const { key, token } = getCreds();
   if (!key || !token) return;
@@ -414,6 +437,7 @@ async function submitUpdate() {
     progress.style.display = 'none';
     btn.disabled = false;
     showToast('Update sent to Trello!');
+    clearCardText(cardId);
     MEDIA_SLOTS.forEach(s => media[s.id] = []);
     await checkExistingAttachments(cardId);
     renderMediaSlots();
