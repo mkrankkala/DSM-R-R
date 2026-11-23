@@ -79,6 +79,28 @@
   .notes-history-entry{background:rgba(184,137,42,.06);border:1px solid rgba(184,137,42,.2);border-radius:10px;padding:.7rem .9rem;margin-bottom:.5rem}
   .notes-history-date{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
   .notes-history-text{font-size:13px;color:#c8bfa8;line-height:1.55;white-space:pre-wrap}
+  .timer-card{border:1px solid var(--border);border-radius:14px;background:var(--bg-card);padding:.85rem .95rem;margin-bottom:.75rem}
+  .timer-card.running{border-color:var(--gold);background:rgba(184,137,42,.08)}
+  .timer-card.done{border-color:rgba(126,203,143,.45)}
+  .timer-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .timer-name{font-size:14px;font-weight:600;color:#e8e0c8}
+  .timer-status{font-size:11px;border-radius:8px;padding:2px 8px;white-space:nowrap}
+  .timer-status.idle{color:var(--text-muted);background:rgba(138,127,106,.15)}
+  .timer-status.running{color:var(--gold-light);background:rgba(184,137,42,.18)}
+  .timer-status.paused{color:#e0b060;background:rgba(224,176,96,.15)}
+  .timer-status.done{color:#7ecb8f;background:rgba(126,203,143,.15)}
+  .timer-clock{font-size:32px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;margin:.35rem 0 .2rem;letter-spacing:.02em}
+  .timer-meta{font-size:11px;color:var(--text-muted);margin-bottom:.6rem;line-height:1.5}
+  .timer-warn{font-size:12px;color:#e07070;background:rgba(224,112,112,.1);border:1px solid rgba(224,112,112,.35);border-radius:8px;padding:6px 9px;margin-bottom:.6rem}
+  .timer-btns{display:flex;gap:8px}
+  .tbtn{flex:1;padding:11px 8px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;border:1px solid var(--gold-dim);background:transparent;color:var(--gold);-webkit-tap-highlight-color:transparent}
+  .tbtn.primary{background:var(--gold);color:#111;border-color:var(--gold)}
+  .tbtn.stop{border-color:#7ecb8f;color:#7ecb8f}
+  .tbtn:active{opacity:.8}
+  .timer-edit{margin-top:.7rem;padding-top:.7rem;border-top:1px solid var(--border)}
+  .timer-edit .row{display:flex;gap:8px}
+  .timer-edit .row .field{flex:1}
+  .sync-note{font-size:11px;color:var(--text-muted);margin:-.3rem 0 .6rem}
   .notes-history-label{font-size:10px;font-weight:600;color:var(--gold);letter-spacing:.06em;text-transform:uppercase;margin-bottom:2px}
 </style>
 </head>
@@ -91,6 +113,11 @@
     <div class="field" style="margin-top:12px"><label>Trello Token</label><input type="text" id="settingToken" placeholder="Paste token here" autocomplete="off"></div>
     <div class="field" style="margin-top:12px"><label>Vehicle R&amp;R List ID</label><input type="text" id="settingListId" placeholder="Paste R&R list ID here" autocomplete="off"></div>
   </div>
+  <p class="section-title">Time log (Google Sheet)</p>
+  <div class="card">
+    <div class="field"><label>Google Sheet web app URL</label><input type="text" id="settingSheetUrl" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off"></div>
+  </div>
+  <div style="font-size:11px;color:var(--text-muted);margin:8px 0 12px">Optional. When set, every teardown/reassembly time is logged to the sheet. Without it, times still save on this device and to the Trello card.</div>
   <div style="font-size:11px;color:var(--text-muted);margin:8px 0 0">Use the same API key/token as the check-in app. The list ID should point to the "Vehicle R&R" list these jobs land in.</div>
   <button class="submit-btn" onclick="saveSettings()" style="margin-top:1rem">Save settings</button>
   <button class="submit-btn" onclick="closeSettings()" style="background:transparent;border:1px solid var(--gold);color:var(--gold);margin-top:8px">Cancel</button>
@@ -116,6 +143,10 @@
   <div class="job-summary" id="jobSummary"></div>
 
   <div id="updateSection" style="display:none">
+    <p class="section-title">Time tracking</p>
+    <div class="sync-note" id="timeSyncNote"></div>
+    <div id="timers"></div>
+
     <p class="section-title">Tech notes</p>
     <div id="notesHistory" style="display:none;margin-bottom:.75rem"></div>
     <div class="field">
@@ -161,6 +192,7 @@ function openSettings() {
   document.getElementById('settingKey').value = localStorage.getItem('trelloKey') || '';
   document.getElementById('settingToken').value = localStorage.getItem('trelloToken') || '';
   document.getElementById('settingListId').value = localStorage.getItem('rrListId') || '';
+  document.getElementById('settingSheetUrl').value = localStorage.getItem('timeSheetUrl') || '';
   document.getElementById('settingsPanel').style.display = 'block';
 }
 function closeSettings() {
@@ -170,6 +202,7 @@ function saveSettings() {
   localStorage.setItem('trelloKey', document.getElementById('settingKey').value.trim());
   localStorage.setItem('trelloToken', document.getElementById('settingToken').value.trim());
   localStorage.setItem('rrListId', document.getElementById('settingListId').value.trim());
+  localStorage.setItem('timeSheetUrl', document.getElementById('settingSheetUrl').value.trim());
   closeSettings();
   showToast('Settings saved!');
   loadJobs();
@@ -239,6 +272,7 @@ function onJobSelect(cardId) {
   const summary = document.getElementById('jobSummary');
   const updateSection = document.getElementById('updateSection');
   if (!cardId) {
+    currentCardId = null;
     summary.style.display = 'none';
     updateSection.style.display = 'none';
     return;
@@ -249,6 +283,7 @@ function onJobSelect(cardId) {
     summary.style.display = 'block';
   }
   updateSection.style.display = 'block';
+  loadTimeState(cardId);
   MEDIA_SLOTS.forEach(s => media[s.id] = []);
   renderMediaSlots();
   checkExistingAttachments(cardId).then(renderMediaSlots);
@@ -541,6 +576,8 @@ async function markComplete() {
   const { key, token } = getCreds();
   if (!completedListId) { showToast('Could not find "Completed Vehicle R&R" list — check list name in Trello'); return; }
 
+  const running = PHASES.filter(ph => timeState[ph.id] && phaseStatus(timeState[ph.id]) === 'running');
+  if (running.length && !confirm(running.map(ph => ph.label).join(' & ') + ' timer is still running. Complete the job anyway? (The timer will keep its current time until you stop or edit it.)')) return;
   if (!confirm('Mark this job as complete and move it to Completed Vehicle R&R?')) return;
 
   const btn = document.getElementById('completeBtn');
@@ -570,6 +607,282 @@ async function markComplete() {
     showToast('Failed to move card — ' + e.message);
   }
 }
+
+// ================= TIME TRACKING =================
+// Each phase keeps a list of time segments [{start, end}]. Pause closes a segment,
+// resume opens a new one. Times are timestamps, so the clock stays right even if
+// the phone locks or the page reloads. State is saved on this device and, if a
+// Google Sheet URL is set, to the sheet (which also lets another device pick it up).
+const PHASES = [
+  { id: 'teardown', label: 'Teardown' },
+  { id: 'reassembly', label: 'Reassembly' }
+];
+const LONG_RUN_MS = 10 * 60 * 60 * 1000; // flag timers running over 10 hours
+let timeState = {};
+let currentCardId = null;
+let editingPhase = null;
+
+function blankPhase() { return { segments: [], done: false, edited: false, manualMs: null, updatedAt: 0 }; }
+function lastSeg(p) { return p.segments[p.segments.length - 1]; }
+function phaseStatus(p) {
+  if (p.done) return 'done';
+  const s = lastSeg(p);
+  if (s && !s.end) return 'running';
+  return p.segments.length ? 'paused' : 'idle';
+}
+function phaseMs(p) {
+  if (p.manualMs != null) return p.manualMs;
+  return p.segments.reduce((t, s) => t + ((s.end || Date.now()) - s.start), 0);
+}
+function fmtClock(ms) {
+  const t = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), sec = t % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+function fmtShort(ms) {
+  const totalMin = Math.round(ms / 60000);
+  const h = Math.floor(totalMin / 60), m = totalMin % 60;
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+function fmtWhen(ms) {
+  return new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+function toLocalInput(ms) {
+  const d = new Date(ms);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function getSheetUrl() { return localStorage.getItem('timeSheetUrl') || ''; }
+function saveLocalTime(cardId) { localStorage.setItem('rrTime_' + cardId, JSON.stringify(timeState)); }
+
+async function loadTimeState(cardId) {
+  currentCardId = cardId;
+  editingPhase = null;
+  timeState = {};
+  try { timeState = JSON.parse(localStorage.getItem('rrTime_' + cardId) || '{}'); } catch (e) {}
+  PHASES.forEach(ph => { if (!timeState[ph.id]) timeState[ph.id] = blankPhase(); });
+  renderTimers();
+
+  const url = getSheetUrl();
+  const note = document.getElementById('timeSyncNote');
+  if (!url) { note.textContent = 'Times save on this device. Add a Google Sheet URL in Settings to log them.'; return; }
+  note.textContent = 'Checking time log…';
+  try {
+    const r = await fetch(`${url}?action=get&cardId=${encodeURIComponent(cardId)}`);
+    const data = await r.json();
+    if (cardId !== currentCardId) return; // user switched jobs meanwhile
+    let changed = false;
+    PHASES.forEach(ph => {
+      const remote = data.phases && data.phases[ph.id];
+      if (remote && (remote.updatedAt || 0) > (timeState[ph.id].updatedAt || 0)) {
+        timeState[ph.id] = remote; changed = true;
+      }
+    });
+    if (changed) { saveLocalTime(cardId); renderTimers(); }
+    note.textContent = '✓ Synced with time log';
+  } catch (e) {
+    note.textContent = '⚠ Could not reach time log — using times saved on this device';
+    console.log(e);
+  }
+}
+
+async function commitPhase(phaseId) {
+  const cardId = currentCardId;
+  const p = timeState[phaseId];
+  p.updatedAt = Date.now();
+  saveLocalTime(cardId);
+  renderTimers();
+
+  const url = getSheetUrl();
+  if (!url) return;
+  const note = document.getElementById('timeSyncNote');
+  const card = jobsCache.find(c => c.id === cardId);
+  const status = phaseStatus(p);
+  const first = p.segments[0], last = lastSeg(p);
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight Apps Script can't answer
+      body: JSON.stringify({
+        action: 'save',
+        cardId,
+        jobName: card ? card.name : '',
+        phase: PHASES.find(ph => ph.id === phaseId).label,
+        phaseId,
+        status,
+        startedAt: first ? first.start : null,
+        finishedAt: status === 'done' && last ? last.end : null,
+        totalMs: phaseMs(p),
+        pauses: Math.max(0, p.segments.length - 1),
+        edited: !!p.edited,
+        state: p
+      })
+    });
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || 'Save failed');
+    if (cardId === currentCardId) note.textContent = '✓ Saved to time log';
+  } catch (e) {
+    if (cardId === currentCardId) note.textContent = '⚠ Could not save to time log — saved on this device, will retry on next change';
+    console.log(e);
+  }
+}
+
+async function postTimeComment(text) {
+  const { key, token } = getCreds();
+  if (!key || !token || !currentCardId) return;
+  try {
+    await fetch(`https://api.trello.com/1/cards/${currentCardId}/actions/comments?key=${key}&token=${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+  } catch (e) { console.log('Time comment failed', e); }
+}
+
+function startPhase(phaseId) {
+  // One tech: starting one phase pauses the other if it's running
+  PHASES.forEach(ph => {
+    if (ph.id !== phaseId && phaseStatus(timeState[ph.id]) === 'running') {
+      lastSeg(timeState[ph.id]).end = Date.now();
+      commitPhase(ph.id);
+      showToast(ph.label + ' paused');
+    }
+  });
+  const p = timeState[phaseId];
+  p.done = false;
+  p.manualMs = p.manualMs != null && p.segments.length ? p.manualMs : null;
+  // If this phase was hand-edited, carry its corrected total forward as one segment
+  if (p.manualMs != null) {
+    const now = Date.now();
+    p.segments = [{ start: now - p.manualMs, end: now }];
+    p.manualMs = null;
+  }
+  p.segments.push({ start: Date.now(), end: null });
+  commitPhase(phaseId);
+}
+function pausePhase(phaseId) {
+  const s = lastSeg(timeState[phaseId]);
+  if (s && !s.end) s.end = Date.now();
+  commitPhase(phaseId);
+}
+function stopPhase(phaseId) {
+  const p = timeState[phaseId];
+  const label = PHASES.find(ph => ph.id === phaseId).label;
+  if (!confirm(`Stop ${label}? Total time: ${fmtShort(phaseMs(p))}`)) return;
+  const s = lastSeg(p);
+  if (s && !s.end) s.end = Date.now();
+  p.done = true;
+  commitPhase(phaseId);
+  postTimeComment(`⏱ ${label} time: ${fmtShort(phaseMs(p))}`);
+  showToast(`${label} logged: ${fmtShort(phaseMs(p))}`);
+}
+
+function openEdit(phaseId) { editingPhase = phaseId; renderTimers(); }
+function cancelEdit() { editingPhase = null; renderTimers(); }
+function editRecalc(phaseId) {
+  const st = document.getElementById('ed_start_' + phaseId).value;
+  const en = document.getElementById('ed_end_' + phaseId).value;
+  if (!st || !en) return;
+  const ms = new Date(en) - new Date(st);
+  if (ms <= 0) return;
+  const totalMin = Math.round(ms / 60000);
+  document.getElementById('ed_h_' + phaseId).value = Math.floor(totalMin / 60);
+  document.getElementById('ed_m_' + phaseId).value = totalMin % 60;
+}
+function saveEdit(phaseId) {
+  const p = timeState[phaseId];
+  const label = PHASES.find(ph => ph.id === phaseId).label;
+  const st = document.getElementById('ed_start_' + phaseId).value;
+  const en = document.getElementById('ed_end_' + phaseId).value;
+  const h = parseInt(document.getElementById('ed_h_' + phaseId).value) || 0;
+  const m = parseInt(document.getElementById('ed_m_' + phaseId).value) || 0;
+  if (!st || !en) { showToast('Enter a start and finish time'); return; }
+  const start = new Date(st).getTime(), end = new Date(en).getTime();
+  if (end <= start) { showToast('Finish has to be after start'); return; }
+  const totalMs = (h * 60 + m) * 60000;
+  if (totalMs <= 0) { showToast('Total time must be more than 0'); return; }
+  const before = phaseMs(p);
+  p.segments = [{ start, end }];
+  // Keep the typed total if it differs from finish − start (e.g. breaks taken out)
+  p.manualMs = totalMs === end - start ? null : totalMs;
+  p.done = true;
+  p.edited = true;
+  editingPhase = null;
+  commitPhase(phaseId);
+  postTimeComment(`⏱ ${label} time corrected: ${fmtShort(totalMs)} (was ${fmtShort(before)})`);
+  showToast(`${label} updated to ${fmtShort(totalMs)}`);
+}
+
+function renderTimers() {
+  const wrap = document.getElementById('timers');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  PHASES.forEach(ph => {
+    const p = timeState[ph.id] || blankPhase();
+    const status = phaseStatus(p);
+    const statusText = { idle: 'Not started', running: 'Running', paused: 'Paused', done: 'Done' }[status];
+    const first = p.segments[0], last = lastSeg(p);
+
+    let meta = '';
+    if (first) meta += `Started ${fmtWhen(first.start)}`;
+    if (status === 'done' && last && last.end) meta += ` · Finished ${fmtWhen(last.end)}`;
+    if (p.segments.length > 1) meta += ` · ${p.segments.length - 1} pause${p.segments.length > 2 ? 's' : ''}`;
+    if (p.edited) meta += ' · Edited';
+
+    let btns = '';
+    if (status === 'idle') btns = `<button class="tbtn primary" onclick="startPhase('${ph.id}')">▶ Start ${ph.label.toLowerCase()}</button>`;
+    else if (status === 'running') btns = `<button class="tbtn" onclick="pausePhase('${ph.id}')">❚❚ Pause</button><button class="tbtn stop" onclick="stopPhase('${ph.id}')">■ Stop</button><button class="tbtn" onclick="openEdit('${ph.id}')">Edit</button>`;
+    else if (status === 'paused') btns = `<button class="tbtn primary" onclick="startPhase('${ph.id}')">▶ Resume</button><button class="tbtn stop" onclick="stopPhase('${ph.id}')">■ Stop</button><button class="tbtn" onclick="openEdit('${ph.id}')">Edit</button>`;
+    else btns = `<button class="tbtn" onclick="openEdit('${ph.id}')">Edit time</button><button class="tbtn" onclick="startPhase('${ph.id}')">▶ Resume</button>`;
+
+    let edit = '';
+    if (editingPhase === ph.id) {
+      const startVal = first ? toLocalInput(first.start) : toLocalInput(Date.now() - 3600000);
+      const endVal = toLocalInput(last && last.end ? last.end : Date.now());
+      const curMin = Math.round(phaseMs(p) / 60000);
+      edit = `<div class="timer-edit">
+        <div class="row">
+          <div class="field"><label>Started</label><input type="datetime-local" id="ed_start_${ph.id}" value="${startVal}" onchange="editRecalc('${ph.id}')"></div>
+          <div class="field"><label>Finished</label><input type="datetime-local" id="ed_end_${ph.id}" value="${endVal}" onchange="editRecalc('${ph.id}')"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Total hours</label><input type="number" min="0" inputmode="numeric" id="ed_h_${ph.id}" value="${Math.floor(curMin / 60)}"></div>
+          <div class="field"><label>Minutes</label><input type="number" min="0" max="59" inputmode="numeric" id="ed_m_${ph.id}" value="${curMin % 60}"></div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin:-2px 0 8px">Changing start/finish fills in the total. You can also type the total directly (for example, to take out a lunch break).</div>
+        <div class="timer-btns"><button class="tbtn primary" onclick="saveEdit('${ph.id}')">Save</button><button class="tbtn" onclick="cancelEdit()">Cancel</button></div>
+      </div>`;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'timer-card' + (status === 'running' ? ' running' : status === 'done' ? ' done' : '');
+    card.innerHTML = `
+      <div class="timer-top"><span class="timer-name">${ph.label}</span><span class="timer-status ${status}">${statusText}</span></div>
+      <div class="timer-clock" id="clock_${ph.id}">${fmtClock(phaseMs(p))}</div>
+      ${meta ? `<div class="timer-meta">${meta}</div>` : ''}
+      <div id="warn_${ph.id}"></div>
+      <div class="timer-btns">${btns}</div>
+      ${edit}`;
+    wrap.appendChild(card);
+  });
+  tickTimers();
+}
+
+function tickTimers() {
+  PHASES.forEach(ph => {
+    const p = timeState[ph.id];
+    if (!p) return;
+    const clock = document.getElementById('clock_' + ph.id);
+    if (clock) clock.textContent = fmtClock(phaseMs(p));
+    const warn = document.getElementById('warn_' + ph.id);
+    if (!warn) return;
+    const s = lastSeg(p);
+    const longRun = phaseStatus(p) === 'running' && s && Date.now() - s.start > LONG_RUN_MS;
+    warn.innerHTML = longRun ? `<div class="timer-warn">Running over 10 hours. Forgot to hit Stop? Tap Edit to set the right finish time.</div>` : '';
+  });
+}
+setInterval(() => { if (currentCardId) tickTimers(); }, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && currentCardId) tickTimers(); });
 
 loadJobs();
 </script>
