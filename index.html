@@ -1114,15 +1114,19 @@ async function spListNames(folderSegments) {
 }
 
 // Upload in 5 MB pieces so big videos work and a weak signal doesn't restart from zero
-async function spUploadFile(jobName, fileName, blob, onPct) {
+async function spStartUpload(jobName, fileName) {
   const c = spCfg();
   const segs = [...c.folder.split('/').map(spClean), spClean(jobName)];
   const folderPath = await spEnsureFolder(segs);
   const driveId = await spDrive();
-  const session = await graph(`/drives/${driveId}/root:/${spPath(...folderPath.split('/'), fileName)}:/createUploadSession`, {
+  return graph(`/drives/${driveId}/root:/${spPath(...folderPath.split('/'), fileName)}:/createUploadSession`, {
     method: 'POST',
     body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } })
   });
+}
+
+async function spUploadFile(jobName, fileName, blob, onPct) {
+  const session = await spStartUpload(jobName, fileName);
   const size = blob.size;
   if (size === 0) throw new Error('Empty file');
   let offset = 0;
@@ -1161,14 +1165,60 @@ async function spBackupJob(cardId, jobName, onStatus) {
   const todo = uploads.filter(a => !existing.has(spFileName(a)));
   let done = 0;
   for (const a of todo) {
-    onStatus(`Copying ${done + 1} of ${todo.length}: ${a.name}`);
-    const r = await fetch(a.url, { headers: { Authorization: `OAuth oauth_consumer_key="${key}", oauth_token="${token}"` } });
-    if (!r.ok) throw new Error('Could not download from Trello: ' + r.status);
-    const blob = await r.blob();
-    await spUploadFile(jobName, spFileName(a), blob, pct => onStatus(`Copying ${done + 1} of ${todo.length} (${pct}%): ${a.name}`));
+    const say = pct => onStatus(`Copying ${done + 1} of ${todo.length}${pct != null ? ` (${pct}%)` : ''}: ${a.name}`);
+    say(null);
+    let blob = null;
+    if (!spDirectBlocked) {
+      try {
+        const r = await fetch(a.url, { headers: { Authorization: `OAuth oauth_consumer_key="${key}", oauth_token="${token}"` } });
+        if (r.ok) blob = await r.blob();
+        else spDirectBlocked = true;
+      } catch (e) { spDirectBlocked = true; } // Trello refused the browser; use the Google script instead
+    }
+    if (blob) await spUploadFile(jobName, spFileName(a), blob, say);
+    else await spCopyViaScript(jobName, a, say);
     done++;
   }
   return { total: uploads.length, copied: done, already: uploads.length - todo.length };
+}
+
+// Older files: the Google Apps Script downloads each piece from Trello and pushes it
+// into a SharePoint upload session the app opens. One request per 10 MB piece.
+let spDirectBlocked = false;
+const SP_SCRIPT_CHUNK = 320 * 1024 * 32; // 10 MiB
+async function spScript(body) {
+  const url = getSheetUrl();
+  if (!url) throw new Error('Older files need the Google Sheet web app URL in Settings (the same one the time log uses).');
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({ ok: false, error: 'Bad reply from Google script' }));
+  if (!j.ok) {
+    if (/Bad request|copyChunk|probe/i.test(j.error || '') ) throw new Error('The Google script needs the new Code.gs. Paste it in and redeploy as a New version.');
+    throw new Error(j.error || 'Google script error');
+  }
+  return j;
+}
+async function spCopyViaScript(jobName, att, onPct) {
+  const { key, token } = getCreds();
+  let size = att.bytes;
+  if (!size) size = (await spScript({ action: 'probe', srcUrl: att.url, key, token })).size;
+  if (!size) throw new Error('Empty file on Trello: ' + att.name);
+  const session = await spStartUpload(jobName, spFileName(att));
+  let start = 0;
+  while (start < size) {
+    const end = Math.min(start + SP_SCRIPT_CHUNK, size) - 1;
+    let tries = 0;
+    while (true) {
+      try {
+        await spScript({ action: 'copyChunk', srcUrl: att.url, key, token, uploadUrl: session.uploadUrl, start, end, size });
+        break;
+      } catch (e) {
+        if (/new Code\.gs|Sheet web app URL/.test(e.message) || ++tries >= 3) { fetch(session.uploadUrl, { method: 'DELETE' }).catch(() => {}); throw e; }
+        await new Promise(res => setTimeout(res, 2000 * tries));
+      }
+    }
+    start = end + 1;
+    onPct(Math.round(start / size * 100));
+  }
 }
 
 async function spBackupCurrentJob() {
@@ -1206,7 +1256,7 @@ async function spBackupAllJobs() {
       const r = await fetch(`https://api.trello.com/1/lists/${l}/cards?fields=id,name&key=${key}&token=${token}`);
       if (r.ok) cards = cards.concat(await r.json());
     }
-    let copied = 0, files = 0, failedJobs = [];
+    let copied = 0, files = 0, failedJobs = [], lastErr = '';
     for (let i = 0; i < cards.length; i++) {
       const c = cards[i];
       try {
@@ -1215,12 +1265,13 @@ async function spBackupAllJobs() {
       } catch (e) {
         console.log('Backup failed for', c.name, e);
         failedJobs.push(c.name);
-        if (/sign-in|Microsoft/i.test(e.message)) throw e;
+        if (/sign-in|Microsoft|new Code\.gs|Sheet web app URL/i.test(e.message)) throw e;
+        lastErr = spExplain(e);
       }
       status.textContent = `Job ${i + 1} of ${cards.length} checked…`;
     }
     status.innerHTML = `<span class="sp-ok">✓ Done. Checked ${cards.length} jobs and ${files} files, copied ${copied} new.</span>` +
-      (failedJobs.length ? `<br><span class="sp-bad">Couldn't finish: ${failedJobs.join(', ')}. Run it again to retry those.</span>` : '');
+      (failedJobs.length ? `<br><span class="sp-bad">Couldn't finish ${failedJobs.length} job(s): ${failedJobs.join(', ')}.<br>Reason: ${lastErr}<br>Run it again to retry those.</span>` : '');
   } catch (e) {
     status.innerHTML = `<span class="sp-bad">Stopped: ${spExplain(e)}</span>`;
     console.log(e);
@@ -1230,7 +1281,7 @@ async function spBackupAllJobs() {
 
 function spExplain(e) {
   const m = (e && e.message) || String(e);
-  if (e instanceof TypeError || /Failed to fetch|Load failed|NetworkError/i.test(m)) return 'connection blocked or offline. If this keeps happening when copying older files, tell Claude: Trello may be blocking browser downloads.';
+  if (e instanceof TypeError || /Failed to fetch|Load failed|NetworkError/i.test(m)) return 'connection blocked or offline. Check the internet connection and try again.';
   if (e.status === 403 || /denied|forbidden/i.test(m)) return "your Microsoft account doesn't have permission to that SharePoint site or the app wasn't approved.";
   if (e.status === 404) return 'SharePoint site not found. Check the site URL in Settings.';
   return m;
