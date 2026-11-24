@@ -101,8 +101,16 @@
   .timer-edit .row{display:flex;gap:8px}
   .timer-edit .row .field{flex:1}
   .sync-note{font-size:11px;color:var(--text-muted);margin:-.3rem 0 .6rem}
+  .sp-bar{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);padding:.6rem .8rem;margin:.75rem 0}
+  .sp-bar .sp-text{flex:1;font-size:12px;color:var(--text-muted);line-height:1.4}
+  .sp-bar .sp-text b{color:#e8e0c8;font-weight:600}
+  .sp-mini{padding:8px 12px;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;border:1px solid var(--gold-dim);background:transparent;color:var(--gold);white-space:nowrap}
+  .sp-mini:disabled{opacity:.5}
+  .sp-ok{color:#7ecb8f!important}
+  .sp-bad{color:#e07070!important}
   .notes-history-label{font-size:10px;font-weight:600;color:var(--gold);letter-spacing:.06em;text-transform:uppercase;margin-bottom:2px}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
 </head>
 <body>
 
@@ -118,6 +126,21 @@
     <div class="field"><label>Google Sheet web app URL</label><input type="text" id="settingSheetUrl" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off"></div>
   </div>
   <div style="font-size:11px;color:var(--text-muted);margin:8px 0 12px">Optional. When set, every teardown/reassembly time is logged to the sheet. Without it, times still save on this device and to the Trello card.</div>
+  <p class="section-title">SharePoint backup (photos &amp; videos)</p>
+  <div class="card">
+    <div class="field"><label>Application (client) ID</label><input type="text" id="settingMsClientId" placeholder="From the Microsoft app registration" autocomplete="off"></div>
+    <div class="field" style="margin-top:12px"><label>Directory (tenant) ID</label><input type="text" id="settingMsTenantId" placeholder="From the Microsoft app registration" autocomplete="off"></div>
+    <div class="field" style="margin-top:12px"><label>SharePoint site URL</label><input type="text" id="settingSpSite" placeholder="https://yourcompany.sharepoint.com/sites/Shop" autocomplete="off"></div>
+    <div class="field" style="margin-top:12px"><label>Folder in that site's Documents</label><input type="text" id="settingSpFolder" placeholder="R&R QC Videos" autocomplete="off"></div>
+    <div id="spAccount" style="font-size:12px;color:var(--text-muted);margin-top:12px"></div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="sp-mini" style="flex:1" id="spSignInBtn" onclick="spSaveAndSignIn()">Sign in to Microsoft</button>
+      <button class="sp-mini" style="flex:1" id="spSignOutBtn" onclick="spSignOut()">Sign out</button>
+    </div>
+    <button class="sp-mini" style="width:100%;margin-top:8px" id="spBackupAllBtn" onclick="spBackupAllJobs()">Back up all R&amp;R jobs now</button>
+    <div id="spBackupAllStatus" style="font-size:12px;color:var(--text-muted);margin-top:8px"></div>
+  </div>
+  <div style="font-size:11px;color:var(--text-muted);margin:8px 0 12px">Optional. When set up, every photo/video sent from this app is also saved to SharePoint, one folder per job. "Back up all" copies anything already on the cards in Vehicle R&amp;R and Completed Vehicle R&amp;R that isn't in SharePoint yet. Best run on a computer, since it downloads every video.</div>
   <div style="font-size:11px;color:var(--text-muted);margin:8px 0 0">Use the same API key/token as the check-in app. The list ID should point to the "Vehicle R&R" list these jobs land in.</div>
   <button class="submit-btn" onclick="saveSettings()" style="margin-top:1rem">Save settings</button>
   <button class="submit-btn" onclick="closeSettings()" style="background:transparent;border:1px solid var(--gold);color:var(--gold);margin-top:8px">Cancel</button>
@@ -155,6 +178,10 @@
 
     <p class="section-title">Photos / video</p>
     <div id="mediaSlots"></div>
+    <div class="sp-bar" id="spJobBar" style="display:none">
+      <div class="sp-text" id="spJobText"></div>
+      <button class="sp-mini" id="spJobBtn" onclick="spBackupCurrentJob()">Back up this job</button>
+    </div>
 
     <p class="section-title">Road test</p>
     <div id="roadTestHistory" style="display:none;margin-bottom:.75rem"></div>
@@ -193,6 +220,11 @@ function openSettings() {
   document.getElementById('settingToken').value = localStorage.getItem('trelloToken') || '';
   document.getElementById('settingListId').value = localStorage.getItem('rrListId') || '';
   document.getElementById('settingSheetUrl').value = localStorage.getItem('timeSheetUrl') || '';
+  document.getElementById('settingMsClientId').value = localStorage.getItem('msClientId') || '';
+  document.getElementById('settingMsTenantId').value = localStorage.getItem('msTenantId') || '';
+  document.getElementById('settingSpSite').value = localStorage.getItem('spSiteUrl') || '';
+  document.getElementById('settingSpFolder').value = localStorage.getItem('spFolder') || '';
+  spRenderAccount();
   document.getElementById('settingsPanel').style.display = 'block';
 }
 function closeSettings() {
@@ -203,6 +235,7 @@ function saveSettings() {
   localStorage.setItem('trelloToken', document.getElementById('settingToken').value.trim());
   localStorage.setItem('rrListId', document.getElementById('settingListId').value.trim());
   localStorage.setItem('timeSheetUrl', document.getElementById('settingSheetUrl').value.trim());
+  spSaveSettingsFields();
   closeSettings();
   showToast('Settings saved!');
   loadJobs();
@@ -289,6 +322,7 @@ function onJobSelect(cardId) {
   checkExistingAttachments(cardId).then(renderMediaSlots);
   loadCardText(cardId);
   loadNotesHistory(cardId);
+  spRenderJobBar();
 }
 
 const MEDIA_SLOTS = [
@@ -451,6 +485,10 @@ async function submitUpdate() {
 
   try {
     let uploaded = 0;
+    const spOn = spConfigured() && spSignedIn();
+    const spFailed = [];
+    let spDone = 0;
+    const jobName = (jobsCache.find(c => c.id === cardId) || {}).name || cardId;
     for (const slot of MEDIA_SLOTS) {
       const items = media[slot.id];
       for (const m of items) {
@@ -465,6 +503,20 @@ async function submitUpdate() {
           body: formData
         });
         if (!r.ok) throw new Error('Attachment upload failed: ' + r.status);
+
+        // Same file straight to SharePoint (no re-download needed)
+        if (spOn) {
+          try {
+            const att = await r.json();
+            await spUploadFile(jobName, spFileName(att), m.file, pct => {
+              progress.textContent = `Backing up ${uploaded} of ${totalMedia} to SharePoint... ${pct}%`;
+            });
+            spDone++;
+          } catch (err) {
+            console.log('SharePoint backup failed', err);
+            spFailed.push(m.name);
+          }
+        }
       }
     }
 
@@ -488,7 +540,15 @@ async function submitUpdate() {
 
     progress.style.display = 'none';
     btn.disabled = false;
-    showToast('Update sent to Trello!');
+    if (spOn && totalMedia) {
+      if (spFailed.length) showToast(`Sent to Trello. ${spFailed.length} file(s) didn't reach SharePoint, tap "Back up this job" to retry`, 6000);
+      else showToast(`Sent to Trello and backed up ${spDone} file(s) to SharePoint`);
+    } else if (spConfigured() && totalMedia) {
+      showToast('Sent to Trello. Not signed in to Microsoft, so nothing was backed up. Sign in under Settings, then tap "Back up this job"', 7000);
+    } else {
+      showToast('Update sent to Trello!');
+    }
+    spRenderJobBar();
     clearCardText(cardId);
     MEDIA_SLOTS.forEach(s => media[s.id] = []);
     await checkExistingAttachments(cardId);
@@ -582,6 +642,13 @@ async function markComplete() {
 
   const btn = document.getElementById('completeBtn');
   btn.disabled = true;
+
+  // Make sure everything on the card is in SharePoint before it leaves the list
+  if (spConfigured() && spSignedIn()) {
+    btn.textContent = 'Checking SharePoint backup...';
+    try { await spBackupJob(cardId, (jobsCache.find(c => c.id === cardId) || {}).name || cardId, () => {}); }
+    catch (e) { console.log('Backup before complete failed', e); showToast('SharePoint backup check failed. Job will still move; run "Back up all" later', 5000); }
+  }
   btn.textContent = 'Moving...';
 
   try {
@@ -883,6 +950,311 @@ function tickTimers() {
 }
 setInterval(() => { if (currentCardId) tickTimers(); }, 1000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && currentCardId) tickTimers(); });
+
+// ================= SHAREPOINT BACKUP =================
+// Signs in with the shop's Microsoft 365 account (MSAL, redirect sign-in so it works on
+// iPhone home-screen apps), then uses Microsoft Graph to save files into
+//   <site Documents>/<folder>/<job name>/<slot> - <date> - <file> [id].ext
+// The [id] is the end of the Trello attachment ID, so the same file is never copied twice.
+const SP_SCOPES = ['Sites.ReadWrite.All'];
+const SP_CHUNK = 320 * 1024 * 16; // 5 MiB, must be a multiple of 320 KiB
+let msalApp = null;
+let spDriveCache = null;
+const spFolderCache = new Set();
+
+function spCfg() {
+  return {
+    clientId: localStorage.getItem('msClientId') || '',
+    tenantId: localStorage.getItem('msTenantId') || '',
+    siteUrl: (localStorage.getItem('spSiteUrl') || '').replace(/\/+$/, ''),
+    folder: (localStorage.getItem('spFolder') || 'R&R QC Videos').replace(/^\/+|\/+$/g, '')
+  };
+}
+function spConfigured() { const c = spCfg(); return !!(c.clientId && c.tenantId && c.siteUrl && window.msal); }
+function spSignedIn() { return !!(msalApp && msalApp.getAllAccounts().length); }
+
+function spSaveSettingsFields() {
+  const prev = JSON.stringify(spCfg());
+  localStorage.setItem('msClientId', document.getElementById('settingMsClientId').value.trim());
+  localStorage.setItem('msTenantId', document.getElementById('settingMsTenantId').value.trim());
+  localStorage.setItem('spSiteUrl', document.getElementById('settingSpSite').value.trim());
+  localStorage.setItem('spFolder', document.getElementById('settingSpFolder').value.trim());
+  if (JSON.stringify(spCfg()) !== prev) { spDriveCache = null; spFolderCache.clear(); msalApp = null; }
+}
+
+async function spInit() {
+  if (!spConfigured()) return null;
+  if (msalApp) return msalApp;
+  const c = spCfg();
+  msalApp = new msal.PublicClientApplication({
+    auth: {
+      clientId: c.clientId,
+      authority: 'https://login.microsoftonline.com/' + c.tenantId,
+      redirectUri: window.location.origin + window.location.pathname
+    },
+    cache: { cacheLocation: 'localStorage' }
+  });
+  await msalApp.initialize();
+  try {
+    const res = await msalApp.handleRedirectPromise();
+    if (res && res.account) { msalApp.setActiveAccount(res.account); showToast('Signed in to Microsoft as ' + res.account.username); }
+  } catch (e) { console.log('Microsoft sign-in error', e); showToast('Microsoft sign-in failed: ' + (e.errorMessage || e.message).split('\n')[0], 6000); }
+  const acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
+  if (acct) msalApp.setActiveAccount(acct);
+  return msalApp;
+}
+
+async function spSaveAndSignIn() {
+  spSaveSettingsFields();
+  if (!window.msal) { showToast('Microsoft sign-in library did not load. Check the internet connection'); return; }
+  if (!spConfigured()) { showToast('Fill in the client ID, tenant ID, and site URL first'); return; }
+  await spInit();
+  await msalApp.loginRedirect({ scopes: SP_SCOPES, prompt: 'select_account' });
+}
+async function spSignOut() {
+  await spInit();
+  if (!msalApp) return;
+  const acct = msalApp.getActiveAccount();
+  // Clear the sign-in on this device only (doesn't sign them out of Microsoft everywhere)
+  await msalApp.clearCache({ account: acct || undefined });
+  spRenderAccount(); spRenderJobBar();
+  showToast('Signed out of Microsoft on this device');
+}
+
+async function spToken() {
+  await spInit();
+  if (!msalApp) throw new Error('SharePoint not set up');
+  const acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
+  if (!acct) throw new Error('Not signed in to Microsoft');
+  try {
+    return (await msalApp.acquireTokenSilent({ scopes: SP_SCOPES, account: acct })).accessToken;
+  } catch (e) {
+    // Never redirect in the middle of an upload; that would lose the selected files
+    throw new Error('Microsoft sign-in expired. Sign in again under Settings');
+  }
+}
+
+async function graph(path, opts = {}) {
+  const token = await spToken();
+  const r = await fetch('https://graph.microsoft.com/v1.0' + path, {
+    ...opts,
+    headers: { Authorization: 'Bearer ' + token, ...(opts.body && typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) }
+  });
+  if (!r.ok) {
+    let msg = r.status + '';
+    try { const j = await r.json(); msg = (j.error && j.error.message) || msg; } catch (e) {}
+    const err = new Error(msg); err.status = r.status; throw err;
+  }
+  return r.status === 204 ? null : r.json();
+}
+
+async function spDrive() {
+  if (spDriveCache) return spDriveCache;
+  const u = new URL(spCfg().siteUrl);
+  const sitePath = u.pathname.replace(/\/+$/, '');
+  const site = await graph(`/sites/${u.hostname}${sitePath ? ':' + sitePath : ''}?$select=id`);
+  const drive = await graph(`/sites/${site.id}/drive?$select=id`);
+  spDriveCache = drive.id;
+  return spDriveCache;
+}
+
+// SharePoint doesn't allow  " * : < > ? / \ |  in names, or leading/trailing spaces and dots
+function spClean(name) {
+  return String(name).replace(/["*:<>?\/\\|#%]/g, '-').replace(/\s+/g, ' ').trim().replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 180) || 'file';
+}
+function spPath(...parts) { return parts.map(p => encodeURIComponent(p)).join('/'); }
+
+function spFileName(att) {
+  const d = new Date(att.date || Date.now());
+  const pad = n => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}.${pad(d.getMinutes())}`;
+  const name = att.name || att.fileName || 'file';
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
+  // Trello names these "<slot> - <original>", so put the date after the slot
+  const m = base.match(/^(.*?) - (.*)$/);
+  const label = m ? `${m[1]} - ${stamp} - ${m[2]}` : `${stamp} - ${base}`;
+  return spClean(`${label} [${String(att.id || '').slice(-5)}]${ext}`);
+}
+
+async function spEnsureFolder(segments) {
+  const driveId = await spDrive();
+  let parentPath = '';
+  for (const seg of segments) {
+    const path = parentPath ? parentPath + '/' + seg : seg;
+    if (!spFolderCache.has(path)) {
+      try {
+        await graph(`/drives/${driveId}/root:/${spPath(...path.split('/'))}?$select=id`);
+      } catch (e) {
+        if (e.status !== 404) throw e;
+        const parentRef = parentPath ? `/drives/${driveId}/root:/${spPath(...parentPath.split('/'))}:/children` : `/drives/${driveId}/root/children`;
+        try {
+          await graph(parentRef, { method: 'POST', body: JSON.stringify({ name: seg, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }) });
+        } catch (e2) { if (e2.status !== 409) throw e2; }
+      }
+      spFolderCache.add(path);
+    }
+    parentPath = path;
+  }
+  return parentPath;
+}
+
+async function spListNames(folderSegments) {
+  const driveId = await spDrive();
+  const names = new Set();
+  let url = `/drives/${driveId}/root:/${spPath(...folderSegments)}:/children?$select=name&$top=999`;
+  try {
+    while (url) {
+      const res = await graph(url);
+      res.value.forEach(i => names.add(i.name));
+      url = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null;
+    }
+  } catch (e) { if (e.status !== 404) throw e; }
+  return names;
+}
+
+// Upload in 5 MB pieces so big videos work and a weak signal doesn't restart from zero
+async function spUploadFile(jobName, fileName, blob, onPct) {
+  const c = spCfg();
+  const segs = [...c.folder.split('/').map(spClean), spClean(jobName)];
+  const folderPath = await spEnsureFolder(segs);
+  const driveId = await spDrive();
+  const session = await graph(`/drives/${driveId}/root:/${spPath(...folderPath.split('/'), fileName)}:/createUploadSession`, {
+    method: 'POST',
+    body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } })
+  });
+  const size = blob.size;
+  if (size === 0) throw new Error('Empty file');
+  let offset = 0;
+  while (offset < size) {
+    const end = Math.min(offset + SP_CHUNK, size);
+    let tries = 0;
+    while (true) {
+      try {
+        const r = await fetch(session.uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Range': `bytes ${offset}-${end - 1}/${size}` },
+          body: blob.slice(offset, end)
+        });
+        if (!r.ok && r.status !== 202) throw new Error('Chunk upload failed: ' + r.status);
+        break;
+      } catch (e) {
+        if (++tries >= 3) { fetch(session.uploadUrl, { method: 'DELETE' }).catch(() => {}); throw e; }
+        await new Promise(res => setTimeout(res, 1500 * tries));
+      }
+    }
+    offset = end;
+    if (onPct) onPct(Math.round(offset / size * 100));
+  }
+}
+
+// Copy every uploaded file on a Trello card that isn't in SharePoint yet
+async function spBackupJob(cardId, jobName, onStatus) {
+  const { key, token } = getCreds();
+  const atts = await fetch(`https://api.trello.com/1/cards/${cardId}/attachments?fields=id,name,date,isUpload,url,bytes&key=${key}&token=${token}`).then(r => {
+    if (!r.ok) throw new Error('Could not read Trello attachments: ' + r.status);
+    return r.json();
+  });
+  const uploads = atts.filter(a => a.isUpload);
+  const c = spCfg();
+  const existing = await spListNames([...c.folder.split('/').map(spClean), spClean(jobName)]);
+  const todo = uploads.filter(a => !existing.has(spFileName(a)));
+  let done = 0;
+  for (const a of todo) {
+    onStatus(`Copying ${done + 1} of ${todo.length}: ${a.name}`);
+    const r = await fetch(a.url, { headers: { Authorization: `OAuth oauth_consumer_key="${key}", oauth_token="${token}"` } });
+    if (!r.ok) throw new Error('Could not download from Trello: ' + r.status);
+    const blob = await r.blob();
+    await spUploadFile(jobName, spFileName(a), blob, pct => onStatus(`Copying ${done + 1} of ${todo.length} (${pct}%): ${a.name}`));
+    done++;
+  }
+  return { total: uploads.length, copied: done, already: uploads.length - todo.length };
+}
+
+async function spBackupCurrentJob() {
+  const cardId = document.getElementById('jobSelect').value;
+  if (!cardId) return;
+  if (!spSignedIn()) { openSettings(); showToast('Sign in to Microsoft first'); return; }
+  const btn = document.getElementById('spJobBtn');
+  const text = document.getElementById('spJobText');
+  btn.disabled = true;
+  try {
+    const res = await spBackupJob(cardId, (jobsCache.find(c => c.id === cardId) || {}).name || cardId, msg => { text.textContent = msg; });
+    text.innerHTML = `<span class="sp-ok">✓ All ${res.total} file(s) on this card are in SharePoint</span>${res.copied ? ` (${res.copied} just copied)` : ''}`;
+  } catch (e) {
+    text.innerHTML = `<span class="sp-bad">Backup failed: ${spExplain(e)}</span>`;
+    console.log(e);
+  }
+  btn.disabled = false;
+}
+
+async function spBackupAllJobs() {
+  spSaveSettingsFields();
+  const status = document.getElementById('spBackupAllStatus');
+  const btn = document.getElementById('spBackupAllBtn');
+  if (!spConfigured()) { status.textContent = 'Fill in the SharePoint fields first.'; return; }
+  await spInit();
+  if (!spSignedIn()) { status.textContent = 'Sign in to Microsoft first.'; return; }
+  const { key, token, listId } = getCreds();
+  btn.disabled = true;
+  try {
+    const lists = [listId];
+    if (!completedListId) await loadJobs();
+    if (completedListId) lists.push(completedListId);
+    let cards = [];
+    for (const l of lists) {
+      const r = await fetch(`https://api.trello.com/1/lists/${l}/cards?fields=id,name&key=${key}&token=${token}`);
+      if (r.ok) cards = cards.concat(await r.json());
+    }
+    let copied = 0, files = 0, failedJobs = [];
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
+      try {
+        const res = await spBackupJob(c.id, c.name, msg => { status.textContent = `Job ${i + 1} of ${cards.length} (${c.name}): ${msg}`; });
+        copied += res.copied; files += res.total;
+      } catch (e) {
+        console.log('Backup failed for', c.name, e);
+        failedJobs.push(c.name);
+        if (/sign-in|Microsoft/i.test(e.message)) throw e;
+      }
+      status.textContent = `Job ${i + 1} of ${cards.length} checked…`;
+    }
+    status.innerHTML = `<span class="sp-ok">✓ Done. Checked ${cards.length} jobs and ${files} files, copied ${copied} new.</span>` +
+      (failedJobs.length ? `<br><span class="sp-bad">Couldn't finish: ${failedJobs.join(', ')}. Run it again to retry those.</span>` : '');
+  } catch (e) {
+    status.innerHTML = `<span class="sp-bad">Stopped: ${spExplain(e)}</span>`;
+    console.log(e);
+  }
+  btn.disabled = false;
+}
+
+function spExplain(e) {
+  const m = (e && e.message) || String(e);
+  if (e instanceof TypeError || /Failed to fetch|Load failed|NetworkError/i.test(m)) return 'connection blocked or offline. If this keeps happening when copying older files, tell Claude: Trello may be blocking browser downloads.';
+  if (e.status === 403 || /denied|forbidden/i.test(m)) return "your Microsoft account doesn't have permission to that SharePoint site or the app wasn't approved.";
+  if (e.status === 404) return 'SharePoint site not found. Check the site URL in Settings.';
+  return m;
+}
+
+function spRenderAccount() {
+  const el = document.getElementById('spAccount');
+  if (!el) return;
+  if (!window.msal) { el.textContent = 'Microsoft sign-in library failed to load.'; return; }
+  if (!spConfigured()) { el.textContent = 'Not set up yet.'; return; }
+  const acct = msalApp && (msalApp.getActiveAccount() || msalApp.getAllAccounts()[0]);
+  el.innerHTML = acct ? `<span class="sp-ok">✓ Signed in as ${acct.username}</span>` : 'Not signed in on this device.';
+}
+function spRenderJobBar() {
+  const bar = document.getElementById('spJobBar');
+  if (!bar) return;
+  if (!spConfigured()) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  document.getElementById('spJobText').innerHTML = spSignedIn()
+    ? '<b>SharePoint backup on.</b> New photos/videos are saved there when you send.'
+    : '<span class="sp-bad">Not signed in to Microsoft</span>, so files only go to Trello. Sign in under Settings.';
+}
+
+spInit().then(() => { spRenderAccount(); spRenderJobBar(); }).catch(e => console.log(e));
 
 loadJobs();
 </script>
